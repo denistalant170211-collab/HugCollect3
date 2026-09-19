@@ -17,8 +17,11 @@ from telegram.ext import (
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+# Telegram HTTP request logs are useful for errors, but normal request noise
+# makes Render logs harder to read.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("hugbot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -36,6 +39,10 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 PROFILE_BANNER = ASSETS_DIR / "profile_banner.png"
 MENU_BANNER = ASSETS_DIR / "menu_banner.png"
+
+logger.info("BASE_DIR=%s", BASE_DIR)
+logger.info("PROFILE_BANNER=%s exists=%s", PROFILE_BANNER, PROFILE_BANNER.exists())
+logger.info("MENU_BANNER=%s exists=%s", MENU_BANNER, MENU_BANNER.exists())
 
 # For the demo, data is stored in SQLite.
 # On Render Free the local filesystem is ephemeral, so this is fine for a demo,
@@ -222,57 +229,69 @@ async def send_profile(update: Update, profile: dict):
     )
 
     if PROFILE_BANNER.exists():
-        with PROFILE_BANNER.open("rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption=caption,
-                reply_markup=kb_profile,
-            )
-    else:
-        await update.message.reply_text(caption, reply_markup=kb_profile)
+        try:
+            with PROFILE_BANNER.open("rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=caption,
+                    reply_markup=kb_profile,
+                )
+            return
+        except Exception:
+            logger.exception("Failed to send profile banner: %s", PROFILE_BANNER)
+
+    logger.warning("Profile banner is unavailable: %s", PROFILE_BANNER)
+    await update.message.reply_text(caption, reply_markup=kb_profile)
 
 
 async def send_menu(update: Update):
     if MENU_BANNER.exists():
-        with MENU_BANNER.open("rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption="Выберите действие 👇",
-                reply_markup=kb_menu,
-            )
-    else:
-        await update.message.reply_text("Выберите действие 👇", reply_markup=kb_menu)
-
-
-async def run_hug_animation(
-    update: Update, user_id: int, target: str
-):
-    """Cosmetic demo animation. No Telegram message is sent to the target."""
-    msg = await update.message.reply_text(
-        "😴 Идёт процесс отправки обнимашек 😴\n0%",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-    steps = sorted(random.sample(range(10, 95), 5)) + [100]
-    for percent in steps:
-        await asyncio.sleep(random.uniform(0.35, 0.7))
         try:
-            await msg.edit_text(
-                f"😴 Идёт процесс отправки обнимашек 😴\n{percent}%"
-            )
+            with MENU_BANNER.open("rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption="Выберите действие 👇",
+                    reply_markup=kb_menu,
+                )
+            return
         except Exception:
-            pass
+            logger.exception("Failed to send menu banner: %s", MENU_BANNER)
 
-    hug_count = random.randint(120, 500)
-    await asyncio.sleep(0.4)
-    await msg.edit_text(f"🤗 Отправлено объятий — {hug_count} 🤗")
+    logger.warning("Menu banner is unavailable: %s", MENU_BANNER)
+    await update.message.reply_text("Выберите действие 👇", reply_markup=kb_menu)
 
-    add_hug(user_id, target, hug_count)
 
-    await update.message.reply_text(
-        f"Ура! Обнимашки для {target} готовы 💌",
-        reply_markup=kb_hooray,
-    )
+async def run_hug_animation(bot, chat_id: int, message_id: int, user_id: int, target: str):
+    """Cosmetic demo animation. No Telegram message is sent to the target."""
+    try:
+        steps = [10, 25, 40, 60, 80, 100]
+        for percent in steps:
+            await asyncio.sleep(0.55)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"😴 Идёт процесс отправки обнимашек 😴\n{percent}%",
+            )
+
+        hug_count = random.randint(120, 500)
+        await asyncio.sleep(0.35)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"🤗 Отправлено объятий — {hug_count} 🤗",
+        )
+
+        add_hug(user_id, target, hug_count)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Ура! Обнимашки для {target} готовы 💌",
+            reply_markup=kb_hooray,
+        )
+    except Exception:
+        logger.exception(
+            "Hug animation failed: chat_id=%s message_id=%s target=%s",
+            chat_id, message_id, target,
+        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -299,7 +318,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == BTN_YES:
             context.user_data["state"] = None
             target = context.user_data.get("hug_target", "другу")
-            await run_hug_animation(update, user_id, target)
+            msg = await update.message.reply_text(
+                "😴 Идёт процесс отправки обнимашек 😴\n0%",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            # Run the animation as a background task so the webhook handler
+            # returns immediately instead of waiting several seconds.
+            context.application.create_task(
+                run_hug_animation(
+                    context.bot,
+                    update.effective_chat.id,
+                    msg.message_id,
+                    user_id,
+                    target,
+                ),
+                update=update,
+            )
         elif text == BTN_NO:
             context.user_data["state"] = None
             await update.message.reply_text(
