@@ -36,13 +36,25 @@ PORT = int(os.environ.get("PORT", "10000"))
 WEBHOOK_BASE = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_URL")
 
 BASE_DIR = Path(__file__).resolve().parent
-ASSETS_DIR = BASE_DIR / "assets"
+
+# Render can run the service from the repository root even when the project
+# itself is inside /HugCollectBot. Try both layouts so images keep working
+# whether Root Directory is configured or not.
+ASSET_CANDIDATES = [
+    BASE_DIR / "assets",
+    BASE_DIR / "HugCollectBot" / "assets",
+    Path.cwd() / "assets",
+    Path.cwd() / "HugCollectBot" / "assets",
+]
+ASSETS_DIR = next((p for p in ASSET_CANDIDATES if p.is_dir()), ASSET_CANDIDATES[0])
 PROFILE_BANNER = ASSETS_DIR / "profile_banner.png"
 MENU_BANNER = ASSETS_DIR / "menu_banner.png"
 
 logger.info("BASE_DIR=%s", BASE_DIR)
-logger.info("PROFILE_BANNER=%s exists=%s", PROFILE_BANNER, PROFILE_BANNER.exists())
-logger.info("MENU_BANNER=%s exists=%s", MENU_BANNER, MENU_BANNER.exists())
+logger.info("CWD=%s", Path.cwd())
+logger.info("ASSETS_DIR=%s exists=%s", ASSETS_DIR, ASSETS_DIR.is_dir())
+logger.info("PROFILE_BANNER=%s exists=%s", PROFILE_BANNER, PROFILE_BANNER.is_file())
+logger.info("MENU_BANNER=%s exists=%s", MENU_BANNER, MENU_BANNER.is_file())
 
 # For the demo, data is stored in SQLite.
 # On Render Free the local filesystem is ephemeral, so this is fine for a demo,
@@ -261,24 +273,46 @@ async def send_menu(update: Update):
     await update.message.reply_text("Выберите действие 👇", reply_markup=kb_menu)
 
 
+async def _update_progress(bot, chat_id: int, message_id: int, text: str) -> int:
+    """Edit the progress message; if Telegram rejects the edit, send a replacement."""
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+        return message_id
+    except Exception as exc:
+        logger.warning(
+            "Progress edit failed; sending replacement: chat_id=%s message_id=%s error=%s",
+            chat_id, message_id, exc,
+        )
+        try:
+            new_msg = await bot.send_message(chat_id=chat_id, text=text)
+            return new_msg.message_id
+        except Exception:
+            logger.exception("Progress replacement failed: chat_id=%s", chat_id)
+            return message_id
+
+
 async def run_hug_animation(bot, chat_id: int, message_id: int, user_id: int, target: str):
     """Cosmetic demo animation. No Telegram message is sent to the target."""
     try:
         steps = [10, 25, 40, 60, 80, 100]
+        current_message_id = message_id
+
         for percent in steps:
             await asyncio.sleep(0.55)
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"😴 Идёт процесс отправки обнимашек 😴\n{percent}%",
+            current_message_id = await _update_progress(
+                bot,
+                chat_id,
+                current_message_id,
+                f"😴 Идёт процесс отправки обнимашек 😴\n{percent}%",
             )
 
         hug_count = random.randint(120, 500)
         await asyncio.sleep(0.35)
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"🤗 Отправлено объятий — {hug_count} 🤗",
+        current_message_id = await _update_progress(
+            bot,
+            chat_id,
+            current_message_id,
+            f"🤗 Отправлено объятий — {hug_count} 🤗",
         )
 
         add_hug(user_id, target, hug_count)
